@@ -9,8 +9,8 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::core::{Interface, PCSTR};
 
-use super::HostShader;
 use super::container::SigElement;
+use super::{HostShader, Wave64Mode};
 use crate::dxbc::{Container, FourCC};
 
 pub struct Host {
@@ -103,15 +103,29 @@ impl Host {
             let factory: IDXGIFactory4 =
                 CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).map_err(err)?;
             let adapter: IDXGIAdapter1 = if warp {
-                factory.EnumWarpAdapter().map_err(err)?
+                let adapter: IDXGIAdapter1 = factory.EnumWarpAdapter().map_err(err)?;
+                // DXGI under Wine/DXVK may return the first hardware adapter for EnumWarpAdapter.
+                if adapter.GetDesc1().map_err(err)?.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 == 0
+                {
+                    return Err("WARP adapter is not a software adapter".to_string());
+                }
+                adapter
             } else {
                 hardware_adapter(&factory).map_err(err)?
             };
             D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device).map_err(err)?;
             let device = device.ok_or("no device")?;
-            let mut sm = D3D12_FEATURE_DATA_SHADER_MODEL {
-                HighestShaderModel: D3D_SHADER_MODEL_6_6,
-            };
+            Self::check_sm66(&device)?;
+            Ok(Host { device })
+        }
+    }
+
+    fn check_sm66(device: &ID3D12Device) -> Result<(), String> {
+        let mut sm = D3D12_FEATURE_DATA_SHADER_MODEL {
+            HighestShaderModel: D3D_SHADER_MODEL_6_6,
+        };
+        // SAFETY: plain D3D12 feature query with valid struct size.
+        unsafe {
             device
                 .CheckFeatureSupport(
                     D3D12_FEATURE_SHADER_MODEL,
@@ -119,13 +133,106 @@ impl Host {
                     size_of_val(&sm) as u32,
                 )
                 .map_err(err)?;
-            if sm.HighestShaderModel.0 < D3D_SHADER_MODEL_6_6.0 {
-                return Err(format!(
-                    "the device supports SM {:#x} only",
-                    sm.HighestShaderModel.0
-                ));
+        }
+        if sm.HighestShaderModel.0 < D3D_SHADER_MODEL_6_6.0 {
+            return Err(format!(
+                "the device supports SM {:#x} only",
+                sm.HighestShaderModel.0
+            ));
+        }
+        Ok(())
+    }
+
+    /// All SM 6.6 D3D12 adapters available on the machine (hardware adapters
+    /// unless `VICTORY_WARP=1`, followed by WARP).
+    #[cfg(test)]
+    pub fn all_adapters() -> Vec<(String, Self)> {
+        let mut out = Vec::new();
+        let warp_only = std::env::var("VICTORY_WARP").is_ok_and(|v| v == "1");
+        // SAFETY: plain DXGI/D3D12 adapter enumeration.
+        unsafe {
+            if !warp_only
+                && let Ok(factory) =
+                    CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0))
+            {
+                let mut idx = 0u32;
+                while let Ok(adapter) = factory.EnumAdapters1(idx) {
+                    idx += 1;
+                    let Ok(desc) = adapter.GetDesc1() else {
+                        continue;
+                    };
+                    if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
+                        continue;
+                    }
+                    let mut device: Option<ID3D12Device> = None;
+                    if D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device).is_err() {
+                        continue;
+                    }
+                    let Some(device) = device else {
+                        continue;
+                    };
+                    if Self::check_sm66(&device).is_ok() {
+                        let end = desc
+                            .Description
+                            .iter()
+                            .position(|&c| c == 0)
+                            .unwrap_or(desc.Description.len());
+                        let name = String::from_utf16_lossy(&desc.Description[..end]);
+                        out.push((name, Host { device }));
+                    }
+                }
             }
-            Ok(Host { device })
+        }
+        if let Ok(warp) = Self::new(true) {
+            out.push(("WARP".to_string(), warp));
+        }
+        out
+    }
+
+    /// Wave-operation support and `(min, max)` hardware lane counts.
+    pub fn wave_lanes(&self) -> (bool, u32, u32) {
+        let mut opts = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
+        // SAFETY: plain D3D12 feature query with valid struct size.
+        let ok = unsafe {
+            self.device.CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS1,
+                (&raw mut opts).cast(),
+                size_of_val(&opts) as u32,
+            )
+        }
+        .is_ok();
+        if !ok {
+            return (false, 0, 0);
+        }
+        (
+            opts.WaveOps.as_bool(),
+            opts.WaveLaneCountMin,
+            opts.WaveLaneCountMax,
+        )
+    }
+
+    /// Whether the host supports compute shaders requiring 64-lane waves.
+    pub fn supports_wave64(&self) -> bool {
+        let (ops, min, max) = self.wave_lanes();
+        ops && min <= 64 && max >= 64
+    }
+
+    /// Whether the host supports compute shaders requiring 32-lane waves.
+    pub fn supports_wave32(&self) -> bool {
+        let (ops, min, max) = self.wave_lanes();
+        ops && min <= 32 && max >= 32
+    }
+
+    /// Best Wave64 compute lowering strategy supported by this host device.
+    ///
+    /// Hosts without native 64-lane waves default to [`Wave64Mode::Emulate`],
+    /// which keeps non-lane-dependent shaders native while avoiding `Wave32`
+    /// divergent/cross-half miscompilations (`Wave32` remains opt-in).
+    pub fn recommended_wave64_mode(&self) -> Wave64Mode {
+        if self.supports_wave64() {
+            Wave64Mode::Native
+        } else {
+            Wave64Mode::Emulate
         }
     }
 
@@ -733,7 +840,7 @@ fn fmad_probe() -> Result<HostShader, crate::ShaderError> {
         outputs: Vec::new(),
         prims: Vec::new(),
         mesh_stride: 0, mesh_compute: false, wave64_dag: false,
-        view_marks: false,
+        options: super::Options::default(),
     })?;
     Ok(HostShader {
         stage: HwStage::Cs,
@@ -2012,6 +2119,59 @@ impl Host {
             }
             drop(keep);
             Ok(out)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emit::bitcode::Term;
+    use crate::emit::shader::Shader;
+
+    fn cs_with_wave_size(wave_size: Option<u32>) -> HostShader {
+        let mut s = Shader::new(false);
+        s.threads = Some([64, 1, 1]);
+        s.wave_size = wave_size;
+        s.m.terminate(s.entry, Term::Ret);
+        HostShader {
+            stage: crate::HwStage::Cs,
+            dxil: s.finish(),
+            user_data: Vec::new(),
+            samplers: Vec::new(),
+            static_samplers: Vec::new(),
+            root_cbvs: Vec::new(),
+            root_srvs: Vec::new(),
+            root_uavs: Vec::new(),
+            view_marks: false,
+            memory: false,
+            memory_writes: false,
+            view_addresses: false,
+            heap: false,
+            heap_writes: false,
+        }
+    }
+
+    #[test]
+    fn recommended_wave64_mode_matches_device_capabilities() {
+        let _one = super::super::valu_tests::ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (name, h) in Host::all_adapters() {
+            let mode = h.recommended_wave64_mode();
+            let expected = if h.supports_wave64() {
+                Wave64Mode::Native
+            } else {
+                Wave64Mode::Emulate
+            };
+            assert_eq!(mode, expected, "{name}");
+            let required_wave = match mode {
+                Wave64Mode::Native => Some(64),
+                Wave64Mode::Wave32 => Some(32),
+                Wave64Mode::Emulate => None,
+            };
+            h.compute_pipeline(&cs_with_wave_size(required_wave))
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
         }
     }
 }

@@ -262,7 +262,7 @@ mod tests {
         let lowered = super::super::lower::lower(&super::super::lower::Parts {
             native: &native, p: &p, st: &st, io: &io, res: &res,
             inputs: vec![], outputs: vec![position()], prims: vec![],
-            mesh_stride: 0, view_marks: false, mesh_compute: true, wave64_dag: false,
+            mesh_stride: 0, options: crate::emit::Options::default(), mesh_compute: true, wave64_dag: false,
         }).unwrap();
         HostShader { stage: HwStage::Cs, dxil: lowered.dxil, user_data: lowered.user_data,
             samplers: lowered.samplers, static_samplers: vec![],
@@ -346,7 +346,7 @@ mod tests {
         let lowered = super::super::lower::lower(&super::super::lower::Parts {
             native: &native, p: &p, st: &st, io: &io, res: &res,
             inputs: vec![], outputs: vec![position()], prims: vec![],
-            mesh_stride: 0, view_marks: false, mesh_compute: true, wave64_dag: true,
+            mesh_stride: 0, options: crate::emit::Options::default(), mesh_compute: true, wave64_dag: true,
         }).expect("high-half triangle through guest-wave DAG");
         let shader = HostShader {
             stage: HwStage::Cs, dxil: lowered.dxil, user_data: lowered.user_data,
@@ -562,7 +562,7 @@ mod tests {
         let lowered = super::super::lower::lower(&super::super::lower::Parts {
             native: &native, p: &p, st: &st, io: &io, res: &res,
             inputs: vec![], outputs: vec![position()], prims: vec![],
-            mesh_stride: 0, view_marks: false, mesh_compute: true, wave64_dag: true,
+            mesh_stride: 0, options: crate::emit::Options::default(), mesh_compute: true, wave64_dag: true,
         }).expect("image reads through the guest-wave DAG");
         let shader = HostShader {
             stage: HwStage::Cs, dxil: lowered.dxil, user_data: lowered.user_data,

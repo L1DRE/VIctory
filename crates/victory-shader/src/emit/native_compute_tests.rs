@@ -209,7 +209,7 @@ fn analyze(
         prims: vec![],
         mesh_stride: 0,
         mesh_compute: false,
-        wave64_dag: false, view_marks: false,
+        wave64_dag: false, options: crate::emit::Options::default(),
     });
     (p, st, res, io, proved)
 }

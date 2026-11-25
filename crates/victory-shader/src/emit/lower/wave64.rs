@@ -415,7 +415,7 @@ mod tests {
         let res = crate::resource::Resources::default();
         let st = crate::structure::structure(p).unwrap();
         let parts = Parts { native: &native, p, st: &st, io: &io, res: &res,
-            inputs: vec![], outputs: vec![], prims: vec![], mesh_stride: 128, view_marks: false,
+            inputs: vec![], outputs: vec![], prims: vec![], mesh_stride: 128, options: crate::emit::Options::default(),
             mesh_compute: true, wave64_dag: true,   };
         let bad = HashMap::new();
         Lower::new(&parts, &bad).dag_plan()

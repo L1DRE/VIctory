@@ -85,7 +85,7 @@ fn validate(stage: HwStage, marks: bool) -> Result<(), String> {
         mesh_stride: 0,
         mesh_compute: false,
         wave64_dag: false,
-        view_marks: marks,
+        options: crate::emit::Options { view_marks: marks, ..Default::default() },
     })
     .expect("lower");
     assert_eq!(l.view_marks, marks, "write marks: the module's marks UAV");

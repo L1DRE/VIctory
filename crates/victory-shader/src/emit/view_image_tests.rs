@@ -185,7 +185,7 @@ fn lower(native: &NativeProgram) -> Result<lower::Lowered, ShaderError> {
         mesh_stride: 0,
         mesh_compute: false,
         wave64_dag: false,
-        view_marks: false,
+        options: crate::emit::Options::default(),
     })
 }
 
