@@ -124,22 +124,32 @@ pub(crate) fn alias_copy(list: &HostList, from: This, to: This) {
     let footprints = |d: &D3D12_RESOURCE_DESC, n: u32| {
         let mut f = vec![D3D12_PLACED_SUBRESOURCE_FOOTPRINT::default(); n as usize];
         let mut rows = vec![0u32; n as usize];
+        let mut row_bytes = vec![0u64; n as usize];
         let mut total = 0;
         // SAFETY: outputs sized for `n` subresources.
         unsafe {
-            host.device
-                .GetCopyableFootprints(d, 0, n, 0, Some(f.as_mut_ptr()), Some(rows.as_mut_ptr()), None, Some(&mut total));
+            host.device.GetCopyableFootprints(
+                d,
+                0,
+                n,
+                0,
+                Some(f.as_mut_ptr()),
+                Some(rows.as_mut_ptr()),
+                Some(row_bytes.as_mut_ptr()),
+                Some(&mut total),
+            );
         }
-        (f, rows, total)
+        (f, rows, row_bytes, total)
     };
-    let (fa, ra, total) = footprints(&da, count(&da));
-    let (fb, rb, _) = footprints(&db, count(&db));
+    let (fa, ra, sa, total_a) = footprints(&da, count(&da));
+    let (fb, rb, sb, total_b) = footprints(&db, count(&db));
+    let total = total_a.max(total_b);
     // Subresources in order while both have the same bytes there (mips of
     // a block-compressed texture past its last whole block do not).
     let n = (0..fa.len().min(fb.len()))
         .take_while(|&i| {
             let (x, y) = (fa[i], fb[i]);
-            x.Offset == y.Offset && x.Footprint.RowPitch == y.Footprint.RowPitch && ra[i] == rb[i] && x.Footprint.Depth == y.Footprint.Depth
+            x.Offset == y.Offset && x.Footprint.RowPitch == y.Footprint.RowPitch && ra[i] == rb[i] && sa[i] == sb[i] && x.Footprint.Depth == y.Footprint.Depth
         })
         .count() as u32;
     if n == 0 {
