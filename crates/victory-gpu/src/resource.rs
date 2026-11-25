@@ -233,6 +233,8 @@ pub(crate) fn pc_format(format: u32) -> u32 {
         118 => 45,
         119 => 46,
         120 => 47,
+        85 | 86 | 115 => 28,
+        67 => 10,
         other => other,
     }
 }
