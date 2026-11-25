@@ -323,9 +323,9 @@ impl MeshStages {
         let wave64_dag = cfg!(feature = "diagnostics")
             && std::env::var("VICTORY_MESH_WAVE64_DAG").is_ok_and(|v| v == "1");
         let translated = if wave64_dag {
-            mesh_compute::translate_with(&ms.container, true, victory_shader::emit::Options { view_marks: true })
+            mesh_compute::translate_with(&ms.container, true, victory_shader::emit::Options { view_marks: true, ..Default::default() })
         } else {
-            mesh_compute::translate_with(&ms.container, false, victory_shader::emit::Options { view_marks: true })
+            mesh_compute::translate_with(&ms.container, false, victory_shader::emit::Options { view_marks: true, ..Default::default() })
         };
         let fallback = match translated {
             Ok(f) => f,
