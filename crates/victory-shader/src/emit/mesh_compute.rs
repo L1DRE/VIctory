@@ -700,7 +700,6 @@ mod tests {
             let mut validator = super::super::validator::Validator::load(super::super::validator::Validator::default_path().as_deref()).expect("DXIL validator");
             validator.validate(&mut cs.clone()).expect("compute output shader");
             validator.validate(&mut vs.dxil.clone()).expect("vertex pulling shader");
-            let gpu = super::super::host::Host::new(false).expect("SM 6.6 GPU");
             let mut pixel = Shader::new(true);
             pixel.outputs = vec![SigElement { name: "SV_Target".into(), kind: 16, interp: 0, ..position() }];
             for (col, value) in [1.0f32, 0.25, 0.5, 1.0].into_iter().enumerate() {
@@ -710,26 +709,50 @@ mod tests {
             pixel.m.terminate(pixel.entry, Term::Ret);
             let mut ps = super::super::host::stub_ps();
             ps.dxil = pixel.finish();
-            let (root, pipeline) = gpu.pipeline(&vs, &ps).expect("fallback VS pipeline on the real GPU");
             let mut cs_host = ps.clone();
             cs_host.stage = HwStage::Cs;
             cs_host.dxil = cs;
             use windows::Win32::Graphics::Direct3D12::D3D12_SHADER_VISIBILITY_ALL;
             let draw = super::super::host::Draw { roots: vec![], textures: &[], samplers: &[], vertices: &[], stride: 0, size: (8, 8), mesh_groups: 0 };
-            for (name, mut shader) in [("hand-written DXIL", cs_host), ("native RDNA2 lowered to compute", native_triangle())] {
+            let mut shaders = [("hand-written DXIL", cs_host), ("native RDNA2 lowered to compute", native_triangle())];
+            validator.validate(&mut ps.dxil).expect("fallback pixel shader");
+            for (name, shader) in &mut shaders {
                 validator.validate(&mut shader.dxil).expect(name);
-                let cs_root = gpu.root_signature_for_with_mesh_output(&[(&shader, D3D12_SHADER_VISIBILITY_ALL)], true).unwrap();
-                let cs_pipeline = gpu.compute_pipeline_with(&cs_root, &shader.dxil).unwrap();
-                let fallback = super::super::host::MeshComputeDraw { root: &cs_root, pipeline: &cs_pipeline,
-                    layout, groups: 2, uav_param: 1, srv_param: 2 };
-                let pixels = gpu.draw_with_mesh_compute(&root, &pipeline, &draw, Some(&fallback)).unwrap();
-                assert!(pixels.iter().all(|p| *p == [1.0, 0.25, 0.5, 1.0]), "{name}: {pixels:?}");
+            }
+            for (label, warp) in [("hardware", false), ("WARP", true)] {
+                let Some(gpu) = available_test_gpu(warp) else { continue };
+                let (root, pipeline) = gpu.pipeline(&vs, &ps).expect("fallback VS pipeline");
+                for (name, shader) in &shaders {
+                    let cs_root = gpu.root_signature_for_with_mesh_output(&[(shader, D3D12_SHADER_VISIBILITY_ALL)], true).unwrap();
+                    let cs_pipeline = gpu.compute_pipeline_with(&cs_root, &shader.dxil).unwrap();
+                    let fallback = super::super::host::MeshComputeDraw { root: &cs_root, pipeline: &cs_pipeline,
+                        layout, groups: 2, uav_param: 1, srv_param: 2 };
+                    let pixels = gpu.draw_with_mesh_compute(&root, &pipeline, &draw, Some(&fallback)).unwrap();
+                    assert!(pixels.iter().all(|p| *p == [1.0, 0.25, 0.5, 1.0]), "{label}, {name}: {pixels:?}");
+                    eprintln!("{label}, {name}: {} pixels exact", pixels.len());
+                }
             }
         }
         assert_eq!(layout.bytes(), 60);
         assert_eq!(layout.allocation(2), Some(120));
         assert_eq!(layout.allocation(0), None);
         assert_eq!(layout.allocation(u32::MAX), None);
+    }
+
+    /// Hosted CI may have no hardware adapter, or a WARP device below SM 6.6.
+    /// Validation must run before this probe, and available-device pipeline,
+    /// draw and readback failures must still fail the test.
+    #[cfg(windows)]
+    fn available_test_gpu(warp: bool) -> Option<super::super::host::Host> {
+        let label = if warp { "WARP" } else { "hardware" };
+        match super::super::host::Host::new(warp) {
+            Ok(gpu) => Some(gpu),
+            Err(error) if error == "no hardware adapter" || error.starts_with("the device supports SM ") => {
+                eprintln!("{label} mesh draw skipped: {error}; shader validation still ran");
+                None
+            }
+            Err(error) => panic!("{label} device initialization failed: {error}"),
+        }
     }
 
     fn packed_elements(reverse: bool, mixed: bool) -> Vec<SigElement> {
@@ -852,7 +875,7 @@ mod tests {
         validator.validate(&mut cs_host.dxil).expect("packed fixture compute shader");
         validator.validate(&mut vs.dxil).expect("packed fixture pulling vertex shader");
         validator.validate(&mut ps.dxil).expect("packed fixture pixel shader");
-        let gpu = super::super::host::Host::new(warp).expect("SM 6.6 hardware/WARP device");
+        let Some(gpu) = available_test_gpu(warp) else { return };
         let (root, pipeline) = gpu.pipeline(&vs, &ps).expect("packed fallback VS/PS linkage");
         use windows::Win32::Graphics::Direct3D12::D3D12_SHADER_VISIBILITY_ALL;
         let cs_root = gpu.root_signature_for_with_mesh_output(
