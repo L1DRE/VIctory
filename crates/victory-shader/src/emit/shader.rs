@@ -142,6 +142,9 @@ pub(crate) struct Shader {
     pub mesh: Option<Mesh>,
     /// A geometry shader (the rectangle stage, `rect.rs`); `pixel` is false.
     pub geometry: Option<Geometry>,
+    /// A mesh program lowered as compute (the mesh fallback, #2203).
+    pub mesh_compute: bool,
+    pub(super) mesh_uav: Option<V>,
     /// Dwords of user data the shader reads (0: no user-data buffer).
     pub user_data: u32,
     /// Immediate samplers, bound as `s0..` in [`SAMPLER_SPACE`].
@@ -163,6 +166,9 @@ pub(crate) struct Shader {
     pub wave_size: Option<u32>,
     /// Thread-group shared memory, in dwords.
     pub lds_dwords: u32,
+    pub(super) collective_shared_bytes: u32,
+    pub(super) guest_collective_scratch: Option<(u32, V)>,
+    pub(super) native_election_scratch: Option<V>,
     lds: Option<V>,
     main: V,
     pub entry: usize,
@@ -205,6 +211,8 @@ impl Shader {
             prims: Vec::new(),
             mesh: None,
             geometry: None,
+            mesh_compute: false,
+            mesh_uav: None,
             user_data: 0,
             samplers: 0,
             cmp_samplers: 0,
@@ -216,6 +224,9 @@ impl Shader {
             threads: None,
             wave_size: None,
             lds_dwords: 0,
+            collective_shared_bytes: 0,
+            guest_collective_scratch: None,
+            native_election_scratch: None,
             lds: None,
             main,
             entry,
@@ -445,6 +456,12 @@ impl Shader {
 
     /// The finished container.
     pub fn finish(mut self) -> Vec<u8> {
+        if self.mesh_compute {
+            self.mesh = None;
+            self.inputs.clear();
+            self.outputs.clear();
+            self.prims.clear();
+        }
         let ud_size = (self.user_data * 4).next_multiple_of(16);
         self.fix_user_data_size(ud_size);
         // The clean-up, before anything is declared about the code: a
@@ -478,6 +495,7 @@ impl Shader {
             || !self.root_cbvs.is_empty()
             || !self.root_srvs.is_empty()
             || !self.root_uavs.is_empty()
+            || self.mesh_uav.is_some()
         {
             let empty = self.m.md_str("");
             let mut cbvs = None;
@@ -562,7 +580,7 @@ impl Shader {
                 srvs = Some(self.m.md_node(list));
             }
             let mut uavs = None;
-            if !self.root_uavs.is_empty() {
+            if !self.root_uavs.is_empty() || self.mesh_uav.is_some() {
                 let ty = self
                     .m
                     .named_struct("struct.RWByteAddressBuffer", vec![self.t.i32]);
@@ -571,7 +589,13 @@ impl Shader {
                 let no = self.m.bool(false);
                 let no = self.m.md_value(no);
                 let mut list = Vec::new();
-                for (n, (slot, _)) in self.root_uavs.clone().into_iter().enumerate() {
+                let all: Vec<(u32, u32)> = self
+                    .root_uavs
+                    .iter()
+                    .map(|&(slot, _)| (ROOT_CBV_SPACE, u32::from(slot)))
+                    .chain(self.mesh_uav.map(|_| (super::mesh_compute::SPACE, 0)))
+                    .collect();
+                for (n, (space, slot)) in all.into_iter().enumerate() {
                     // Id, variable, name, space, lower bound, range size,
                     // shape (11: raw buffer), globally coherent, counter,
                     // rasterizer ordered, no extra properties.
@@ -579,8 +603,8 @@ impl Shader {
                         Some(i32c(&mut self, n as u32)),
                         Some(self.m.md_value(u)),
                         Some(empty),
-                        Some(i32c(&mut self, ROOT_CBV_SPACE)),
-                        Some(i32c(&mut self, u32::from(slot))),
+                        Some(i32c(&mut self, space)),
+                        Some(i32c(&mut self, slot)),
                         Some(i32c(&mut self, 1)),
                         Some(i32c(&mut self, 11)),
                         Some(no),
@@ -591,8 +615,8 @@ impl Shader {
                     list.push(Some(self.m.md_node(ops)));
                     bindings.push(Binding {
                         kind: 7,
-                        space: ROOT_CBV_SPACE,
-                        register: u32::from(slot),
+                        space,
+                        register: slot,
                         dxil_kind: 11,
                     });
                 }

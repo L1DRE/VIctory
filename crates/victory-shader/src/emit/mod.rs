@@ -90,6 +90,8 @@ mod intersect_tests;
 pub mod host;
 mod lower;
 mod own_bits;
+pub mod mesh_compute;
+mod wave64;
 mod rect;
 mod sampler;
 mod shader;
@@ -611,6 +613,17 @@ fn emit_program(
     io: &io::Io,
     res: &resource::Resources,
 ) -> Result<(HostShader, Option<u32>), ShaderError> {
+    emit_mode(c, native, p, st, io, res, false, false)
+}
+
+// Same analysis inputs as emit_program, plus the two lowering modes of the
+// mesh fallback (#2203): a mesh program run as compute, and its wave64 DAG.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_mode(
+    c: &Container, native: &NativeProgram, p: &ir::Program,
+    st: &structure::Structured, io: &io::Io, res: &resource::Resources,
+    mesh_compute: bool, wave64_dag: bool,
+) -> Result<(HostShader, Option<u32>), ShaderError> {
     let sig = |fourcc| -> Result<Vec<container::SigElement>, ShaderError> {
         match c.part(fourcc) {
             Some(part) => signature(part.data),
@@ -678,10 +691,12 @@ fn emit_program(
         outputs,
         prims,
         mesh_stride,
+        mesh_compute,
+        wave64_dag,
     })?;
     let wave_size = l.wave_size;
     let shader = HostShader {
-        stage: native.stage,
+        stage: if mesh_compute { HwStage::Cs } else { native.stage },
         dxil: l.dxil,
         user_data: l.user_data,
         static_samplers: l

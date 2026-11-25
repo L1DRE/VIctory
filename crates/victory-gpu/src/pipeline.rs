@@ -71,6 +71,8 @@ pub(crate) struct Shader {
     /// container): the ambient pass follows its dispatches.
     #[cfg(windows)]
     pub(crate) resolves_light: bool,
+    #[cfg(windows)]
+    mesh_compute: OnceLock<Option<host::MeshStages>>,
 }
 
 impl std::fmt::Debug for Shader {
@@ -127,6 +129,8 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
                 resolves_light: bytes
                     .windows(crate::ambient::PROGRAM.len())
                     .any(|w| w == crate::ambient::PROGRAM),
+                #[cfg(windows)]
+                mesh_compute: OnceLock::new(),
             })
         })
         .clone()
@@ -144,6 +148,9 @@ pub(crate) struct Translated {
 
 #[cfg(windows)]
 impl Shader {
+    pub(crate) fn mesh_compute_stages(&self) -> Option<&host::MeshStages> {
+        self.mesh_compute.get_or_init(|| host::MeshStages::new(self)).as_ref()
+    }
     /// The translation, made on first use; a shader that does not
     /// translate is logged once.
     pub(crate) fn translated(&self) -> Option<&Translated> {
@@ -209,6 +216,27 @@ fn translate(container: &[u8]) -> Result<Translated, String> {
         .map(|p| p.used)
         .unwrap_or_default();
     Ok(Translated { host, used, stores })
+}
+
+/// A host shader made elsewhere (the mesh fallback's compute stage) with the
+/// resources the title's container `container` uses.
+#[cfg(windows)]
+fn with_resources(
+    container: &[u8],
+    host: victory_shader::emit::HostShader,
+) -> Result<Translated, String> {
+    use victory_shader::{Container, FourCC, HwStage};
+    let c = Container::parse(container).map_err(|e| e.to_string())?;
+    let used = match c.part(FourCC::DXIL) {
+        Some(part) => victory_shader::native_programs(part.data)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|p| matches!(p.stage, HwStage::Vs | HwStage::Ps | HwStage::Ms | HwStage::Cs))
+            .map(|p| p.used)
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    Ok(Translated { host, used, stores: true })
 }
 
 /// The compute pipelines of the console's ray-tracing structure builder
@@ -834,6 +862,7 @@ pub fn warm(stage: &'static str, container: &[u8], compute: bool) -> (bool, Opti
         translated: OnceLock::new(),
         walks: OnceLock::new(),
         resolves_light: false,
+        mesh_compute: OnceLock::new(),
     });
     let translated = shader.translated().is_some();
     let made = (translated && compute).then(|| make::warm(vec![shader])).flatten();
